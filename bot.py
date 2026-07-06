@@ -35,9 +35,10 @@ SYSTEM = (
     "You help her identify items, price them, and write listings.\n\n"
     "When she sends PHOTOS of an item:\n"
     "1. IDENTIFY it — brand, model/line, era, materials. Use web search to confirm, don't guess.\n"
-    "2. AUTHENTICITY — be honest: you usually can't fully authenticate from photos. Say what looks "
-    "right/off and what she should check (date code, heat stamp, stitching). Never invent a model or "
-    "declare it genuine from photos alone.\n"
+    "2. AUTHENTICITY — you CANNOT authenticate from photos and must never give a real/fake verdict or "
+    "a confidence score; doing so is worse than useless because it's inconsistent. Only ever provide "
+    "the factual markers to check for that model and recommend a proper human authentication service. "
+    "Never invent a model.\n"
     "3. PRICE — a realistic UK resale range for Vinted/Depop/eBay using web search for comparable SOLD "
     "prices, plus one suggested list price.\n"
     "4. LISTING — a punchy title (with the words buyers actually search) and an honest, appealing "
@@ -174,7 +175,7 @@ QUICK_PROMPT = (
 _ITEM_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("💷 Live price (sold comps)", callback_data="act:price"),
      InlineKeyboardButton("📝 Write the listing", callback_data="act:listing")],
-    [InlineKeyboardButton("⚠️ Authenticity check", callback_data="act:auth"),
+    [InlineKeyboardButton("📋 What to check", callback_data="act:auth"),
      InlineKeyboardButton("📖 Tell me more", callback_data="act:more")],
     [InlineKeyboardButton("✅ Done — new item", callback_data="act:done")],
 ])
@@ -187,10 +188,14 @@ _ACTIONS = {
                 "Write a ready-to-post listing for THIS item: a punchy, keyword-rich TITLE (words buyers "
                 "search), then an honest, appealing DESCRIPTION. Note it ships with the y2kbaddie "
                 "thank-you card + collectable art print. Ready to paste — no preamble."),
-    "auth": ("⚠️ running an authenticity check", False,
-             "Give an honest authenticity checklist for THIS exact item — what to check (date code, heat "
-             "stamp, stitching, hardware, lining) and any red/green flags visible in the photos. Be real "
-             "about what photos alone can't confirm. Concise."),
+    "auth": ("📋 pulling the authenticity checklist", True,
+             "For THIS exact model, use web search to give the FACTUAL authenticity markers a buyer or "
+             "professional checks — date-code format & placement, heat-stamp font/spacing, hardware "
+             "engraving, stitching, lining, and 'made in' — as a checklist I can verify myself against "
+             "the item. Do NOT give a verdict and do NOT say whether it's real or fake — you can't "
+             "authenticate from photos, and I know that. End by recommending a proper human "
+             "authentication service (e.g. Entrupy, Real Authentication, or a brand specialist) for "
+             "anything I'm going to sell."),
     "more": ("📖 digging up more on it", True,
              "Tell me more about THIS item — the line's history, why buyers want it, how to style it, and "
              "what makes this one desirable. A few short punchy paragraphs."),
