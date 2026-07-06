@@ -225,7 +225,7 @@ async def _process_batch(context: ContextTypes.DEFAULT_TYPE):
     note = f"\n\nMy notes: {buf['note']}" if buf["note"] else ""
     try:
         answer = await converse(cid, images + [{"type": "text", "text": QUICK_PROMPT + note}],
-                                search=False, think=False, max_tokens=600)
+                                search=False, think=True, max_tokens=2000)
     except Exception as e:
         await context.bot.send_message(cid, f"something went wrong reaching my brain 🌷 ({e}) — try again?")
         return
