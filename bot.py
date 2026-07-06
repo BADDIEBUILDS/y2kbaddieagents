@@ -165,9 +165,11 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 _has_item = set()   # chats that currently have an item in play (for the tap-buttons)
 
 QUICK_PROMPT = (
-    "Identify this item for resale. Give me, in ~4 short punchy lines: brand, model/line, era, key "
-    "materials, and a ROUGH £ resale ballpark from your own knowledge (mark it as a rough guide). "
-    "Do NOT write a listing, a long authenticity essay, or search the web — just the fast ID + ballpark.")
+    "Identify this item for resale as accurately as you can. Use web search to CONFIRM the exact "
+    "brand, model/line and era before committing — don't guess. Then reply in a few short punchy "
+    "lines: brand, model/line, era, key materials, and a rough £ resale ballpark (mark it a rough "
+    "guide). Keep it tight — no full listing or long authenticity essay yet, just the confirmed ID "
+    "+ ballpark. If you genuinely can't be sure of the model, say what it narrows to and why.")
 
 _ITEM_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("💷 Live price (sold comps)", callback_data="act:price"),
@@ -225,7 +227,7 @@ async def _process_batch(context: ContextTypes.DEFAULT_TYPE):
     note = f"\n\nMy notes: {buf['note']}" if buf["note"] else ""
     try:
         answer = await converse(cid, images + [{"type": "text", "text": QUICK_PROMPT + note}],
-                                search=False, think=True, max_tokens=2000)
+                                search=True, think=True, max_tokens=2000)
     except Exception as e:
         await context.bot.send_message(cid, f"something went wrong reaching my brain 🌷 ({e}) — try again?")
         return
