@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import anthropic
 from telegram import Update
+from telegram.error import Conflict
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (Application, CommandHandler, ContextTypes,
                           MessageHandler, filters)
@@ -183,6 +184,17 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def on_error(update, context):
+    """Log errors as a one-line warning instead of a scary red traceback.
+    Telegram 'Conflict' (two instances) self-heals once the duplicate stops."""
+    err = context.error
+    if isinstance(err, Conflict):
+        logging.warning("Telegram Conflict — another instance is polling this token. "
+                        "Make sure only one deploy is running.")
+    else:
+        logging.warning("handler error: %r", err)
+
+
 def _start_health_server():
     port = os.environ.get("PORT")
     if not port:
@@ -210,8 +222,9 @@ def main():
     app.add_handler(CommandHandler("id", whoami))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_error_handler(on_error)
     print("🛍️ y2kbaddie reseller bot live — polling")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
