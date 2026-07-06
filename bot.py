@@ -12,11 +12,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import anthropic
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import Conflict
 from telegram.constants import ChatAction, ParseMode
-from telegram.ext import (Application, CommandHandler, ContextTypes,
-                          MessageHandler, filters)
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
+                          ContextTypes, MessageHandler, filters)
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -59,21 +59,20 @@ def owner_only(func):
     return wrapper
 
 
-async def ask_claude(user_content):
-    """One research turn with live web search. Returns the text answer."""
+async def ask_claude(user_content, *, search=True, think=True, max_tokens=4096):
+    """One turn. search=web comps (slower), think=extended reasoning (slower).
+    The quick ID pass turns both off so it replies in a few seconds."""
     if claude is None:
         return "⚠️ my brain isn't connected — ANTHROPIC_API_KEY isn't set in Railway."
     messages = [{"role": "user", "content": user_content}]
+    kwargs = {"model": MODEL, "max_tokens": max_tokens, "system": SYSTEM, "messages": messages}
+    if think:
+        kwargs["thinking"] = {"type": "adaptive"}
+    if search:
+        kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search"}]
     resp = None
     for _ in range(6):   # allow a few pause_turn continuations while it searches
-        resp = await claude.messages.create(
-            model=MODEL,
-            max_tokens=4096,
-            thinking={"type": "adaptive"},
-            system=SYSTEM,
-            tools=[{"type": "web_search_20260209", "name": "web_search"}],
-            messages=messages,
-        )
+        resp = await claude.messages.create(**kwargs)
         if resp.stop_reason == "pause_turn":
             messages.append({"role": "assistant", "content": resp.content})
             continue
@@ -143,14 +142,46 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _schedule(update, context)
 
 
+# most-recent identified item per chat, so the tap-buttons know what "it" is
+_last_item = {}   # chat_id -> {"images": [image blocks], "note": str}
+
+QUICK_PROMPT = (
+    "Identify this item for resale. Give me, in ~4 short punchy lines: brand, model/line, era, key "
+    "materials, and a ROUGH £ resale ballpark from your own knowledge (mark it as a rough guide). "
+    "Do NOT write a listing, a long authenticity essay, or search the web — just the fast ID + ballpark.")
+
+_ITEM_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("💷 Live price (sold comps)", callback_data="act:price"),
+     InlineKeyboardButton("📝 Write the listing", callback_data="act:listing")],
+    [InlineKeyboardButton("⚠️ Authenticity check", callback_data="act:auth"),
+     InlineKeyboardButton("📖 Tell me more", callback_data="act:more")],
+])
+
+_ACTIONS = {
+    "price": ("💷 pricing it with live sold comps", True,
+              "Price THIS exact item for UK resale. Use web search for comparable SOLD prices on "
+              "eBay/Vinted/Depop. Give a realistic £ range and one suggested list price. Keep it tight."),
+    "listing": ("📝 writing your listing", False,
+                "Write a ready-to-post listing for THIS item: a punchy, keyword-rich TITLE (words buyers "
+                "search), then an honest, appealing DESCRIPTION. Note it ships with the y2kbaddie "
+                "thank-you card + collectable art print. Ready to paste — no preamble."),
+    "auth": ("⚠️ running an authenticity check", False,
+             "Give an honest authenticity checklist for THIS exact item — what to check (date code, heat "
+             "stamp, stitching, hardware, lining) and any red/green flags visible in the photos. Be real "
+             "about what photos alone can't confirm. Concise."),
+    "more": ("📖 digging up more on it", True,
+             "Tell me more about THIS item — the line's history, why buyers want it, how to style it, and "
+             "what makes this one desirable. A few short punchy paragraphs."),
+}
+
+
 async def _process_batch(context: ContextTypes.DEFAULT_TYPE):
     cid = context.job.data
     buf = _buffers.pop(cid, None)
     if not buf or not buf["items"]:
         return
-    await context.bot.send_message(cid, "on it — identifying & pricing your item 🔎🩷 (~30s)")
     await context.bot.send_chat_action(cid, ChatAction.TYPING)
-    content = []
+    images = []
     for fid, media_type in buf["items"][:MAX_IMAGES]:
         try:
             f = await context.bot.get_file(fid)
@@ -159,26 +190,55 @@ async def _process_batch(context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(
                     cid, "one of those images is too big — send it as a Photo (it compresses) 🌷")
                 continue
-            content.append({"type": "image", "source": {
+            images.append({"type": "image", "source": {
                 "type": "base64", "media_type": media_type,
                 "data": base64.standard_b64encode(data).decode()}})
         except Exception as e:
             logging.warning("image download failed: %r", e)
-    if not content:
+    if not images:
         await context.bot.send_message(
             cid, "hmm, none of the images came through 🌷 try sending them again as Photos "
             "(tap the 📎 → Photo, not File).")
         return
-    content.append({"type": "text", "text":
-                    "Here's an item for y2kbaddie. Identify it, flag authenticity honestly, price it "
-                    "for the UK resale market, and write me a ready-to-post listing. "
-                    f"My notes: {buf['note'] or '(none)'}"})
+    _last_item[cid] = {"images": images, "note": buf["note"]}
+    note = f"\n\nMy notes: {buf['note']}" if buf["note"] else ""
     try:
-        answer = await ask_claude(content)
+        answer = await ask_claude(images + [{"type": "text", "text": QUICK_PROMPT + note}],
+                                  search=False, think=False, max_tokens=600)
     except Exception as e:
         await context.bot.send_message(cid, f"something went wrong reaching my brain 🌷 ({e}) — try again?")
         return
+    for chunk in _split(answer):
+        try:
+            await context.bot.send_message(cid, chunk, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            await context.bot.send_message(cid, chunk)
+    await context.bot.send_message(cid, "tap for more 👇", reply_markup=_ITEM_KB)
+
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if OWNER_IDS and str(q.from_user.id) not in OWNER_IDS:
+        return
+    action = q.data.split(":", 1)[1]
+    cid = q.message.chat.id
+    item = _last_item.get(cid)
+    if not item or action not in _ACTIONS:
+        await q.message.reply_text("send me the item photos again 🌷 (I lost track of that one)")
+        return
+    label, search, prompt = _ACTIONS[action]
+    note = f"\n\nMy notes: {item['note']}" if item["note"] else ""
+    await context.bot.send_message(cid, f"{label}… 🔎")
+    await context.bot.send_chat_action(cid, ChatAction.TYPING)
+    try:
+        answer = await ask_claude(item["images"] + [{"type": "text", "text": prompt + note}],
+                                  search=search, think=True)
+    except Exception as e:
+        await context.bot.send_message(cid, f"something went wrong 🌷 ({e}) — try again?")
+        return
     await _reply_long(context, cid, answer)
+    await context.bot.send_message(cid, "anything else? 👇", reply_markup=_ITEM_KB)
 
 
 @owner_only
@@ -196,11 +256,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "hey boss 🛍️🩷 I'm your y2kbaddie reseller assistant\n\n"
-        "📸 *send me photos of an item* (a few angles + any markings) and I'll:\n"
-        "• identify it (brand, model, era)\n"
-        "• flag anything authenticity-wise, honestly\n"
-        "• price it for Vinted / Depop / eBay\n"
-        "• write you a ready-to-post listing\n\n"
+        "📸 *send me photos of an item* (a few angles + any markings). I'll give you a *quick ID + "
+        "ballpark price* in seconds, then buttons to tap for more:\n"
+        "• 💷 live price (real sold comps)\n"
+        "• 📝 write the listing\n"
+        "• ⚠️ authenticity check\n"
+        "• 📖 tell me more\n\n"
         "💬 or just *ask me anything* — pricing, what a piece is, how to word something.\n\n"
         "add a caption with your photos for extra context (e.g. \"tan leather, no date code\").",
         parse_mode=ParseMode.MARKDOWN,
@@ -260,6 +321,7 @@ def main():
     app.add_handler(CommandHandler("id", whoami))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, on_document))
+    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^act:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
     print("🛍️ y2kbaddie reseller bot live — polling")
