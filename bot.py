@@ -166,11 +166,17 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 _has_item = set()   # chats that currently have an item in play (for the tap-buttons)
 
 QUICK_PROMPT = (
-    "Identify this item for resale as accurately as you can. Use web search to CONFIRM the exact "
-    "brand, model/line and era before committing — don't guess. Then reply in a few short punchy "
-    "lines: brand, model/line, era, key materials, and a rough £ resale ballpark (mark it a rough "
-    "guide). Keep it tight — no full listing or long authenticity essay yet, just the confirmed ID "
-    "+ ballpark. If you genuinely can't be sure of the model, say what it narrows to and why.")
+    "Identify this item for resale as accurately as possible — accurate ID is the whole point.\n"
+    "STEP 1: Read every identifying detail visible in the photos — brand marks, date/serial codes, "
+    "heat stamps, engraved hardware, interior tags, 'made in' stamps, style/model codes. Name what "
+    "you can actually see.\n"
+    "STEP 2: Use web search to CONFIRM the exact brand, model/line and era against those details. "
+    "Never guess a model from the silhouette alone.\n"
+    "STEP 3: Reply in a few short lines — brand, model/line, era, key materials, a rough £ ballpark, "
+    "and your CONFIDENCE (high / medium / low).\n"
+    "If you can't confirm the exact model at high confidence, DO NOT invent one — say what it narrows "
+    "to and tell me exactly which close-up photo would confirm it (e.g. 'send a clear shot of the date "
+    "code inside the pocket'). Keep it tight — no full listing yet.")
 
 _ITEM_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("💷 Live price (sold comps)", callback_data="act:price"),
