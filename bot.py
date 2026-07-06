@@ -106,38 +106,69 @@ async def _reply_long(context, chat_id, text):
 
 
 # ── photo batching (albums arrive as separate updates — debounce ~2.5s) ────────
-_buffers = {}   # chat_id -> {"file_ids": [...], "note": str}
+_buffers = {}   # chat_id -> {"items": [(file_id, media_type), ...], "note": str}
+SUPPORTED = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 
-@owner_only
-async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def _schedule(update, context):
     cid = update.effective_chat.id
-    buf = _buffers.setdefault(cid, {"file_ids": [], "note": ""})
-    buf["file_ids"].append(update.message.photo[-1].file_id)   # largest size
     if update.message.caption:
-        buf["note"] = update.message.caption
+        _buffers[cid]["note"] = update.message.caption
     for job in context.job_queue.get_jobs_by_name(f"proc_{cid}"):
         job.schedule_removal()
     context.job_queue.run_once(_process_batch, when=2.5, name=f"proc_{cid}", data=cid, chat_id=cid)
 
 
+@owner_only
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cid = update.effective_chat.id
+    buf = _buffers.setdefault(cid, {"items": [], "note": ""})
+    buf["items"].append((update.message.photo[-1].file_id, "image/jpeg"))   # photos are jpeg
+    _schedule(update, context)
+
+
+@owner_only
+async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Images sent 'as a file' (PNG screenshots etc.) come through as documents."""
+    doc = update.message.document
+    mime = (doc.mime_type or "").lower()
+    if not mime.startswith("image/"):
+        await update.message.reply_text(
+            "that's not an image I can read 🌷 send me a photo of the item (png or jpg is perfect)")
+        return
+    media_type = mime if mime in SUPPORTED else "image/jpeg"
+    cid = update.effective_chat.id
+    buf = _buffers.setdefault(cid, {"items": [], "note": ""})
+    buf["items"].append((doc.file_id, media_type))
+    _schedule(update, context)
+
+
 async def _process_batch(context: ContextTypes.DEFAULT_TYPE):
     cid = context.job.data
     buf = _buffers.pop(cid, None)
-    if not buf or not buf["file_ids"]:
+    if not buf or not buf["items"]:
         return
     await context.bot.send_message(cid, "on it — identifying & pricing your item 🔎🩷 (~30s)")
     await context.bot.send_chat_action(cid, ChatAction.TYPING)
-    images = []
-    for fid in buf["file_ids"][:MAX_IMAGES]:
+    content = []
+    for fid, media_type in buf["items"][:MAX_IMAGES]:
         try:
             f = await context.bot.get_file(fid)
-            data = await f.download_as_bytearray()
-            images.append(base64.standard_b64encode(bytes(data)).decode())
-        except Exception:
-            pass
-    content = [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": d}}
-               for d in images]
+            data = bytes(await f.download_as_bytearray())
+            if len(data) > 4_500_000:   # Anthropic caps images ~5MB after base64
+                await context.bot.send_message(
+                    cid, "one of those images is too big — send it as a Photo (it compresses) 🌷")
+                continue
+            content.append({"type": "image", "source": {
+                "type": "base64", "media_type": media_type,
+                "data": base64.standard_b64encode(data).decode()}})
+        except Exception as e:
+            logging.warning("image download failed: %r", e)
+    if not content:
+        await context.bot.send_message(
+            cid, "hmm, none of the images came through 🌷 try sending them again as Photos "
+            "(tap the 📎 → Photo, not File).")
+        return
     content.append({"type": "text", "text":
                     "Here's an item for y2kbaddie. Identify it, flag authenticity honestly, price it "
                     "for the UK resale market, and write me a ready-to-post listing. "
@@ -184,13 +215,20 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+_conflict_logged = False
+
+
 async def on_error(update, context):
     """Log errors as a one-line warning instead of a scary red traceback.
-    Telegram 'Conflict' (two instances) self-heals once the duplicate stops."""
+    Telegram 'Conflict' (two instances) self-heals once the duplicate stops —
+    log it only once so it doesn't spam."""
+    global _conflict_logged
     err = context.error
     if isinstance(err, Conflict):
-        logging.warning("Telegram Conflict — another instance is polling this token. "
-                        "Make sure only one deploy is running.")
+        if not _conflict_logged:
+            _conflict_logged = True
+            logging.warning("Telegram Conflict — another instance is polling this token. "
+                            "Ensure only ONE Railway deploy is active. Silencing further repeats.")
     else:
         logging.warning("handler error: %r", err)
 
@@ -221,6 +259,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("id", whoami))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    app.add_handler(MessageHandler(filters.Document.IMAGE, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
     print("🛍️ y2kbaddie reseller bot live — polling")
