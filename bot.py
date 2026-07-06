@@ -59,13 +59,23 @@ def owner_only(func):
     return wrapper
 
 
-async def ask_claude(user_content, *, search=True, think=True, max_tokens=4096):
-    """One turn. search=web comps (slower), think=extended reasoning (slower).
-    The quick ID pass turns both off so it replies in a few seconds."""
+# running conversation per chat, so it remembers the item + your whole back-and-forth
+# until you start a new item (send new photos) or tap Done / send /new.
+_convo = {}   # chat_id -> [ {role, content}, ... ]  (first user turn holds the item photos)
+
+
+def _trim(convo):
+    """Bound history/cost: keep the first turn (has the photos) + the last ~16 messages."""
+    if len(convo) > 18:
+        del convo[1:len(convo) - 16]
+
+
+async def _complete(messages, *, search=True, think=True, max_tokens=4096):
+    """Run one API turn over a COPY of messages; return assistant text (doesn't mutate input)."""
     if claude is None:
         return "⚠️ my brain isn't connected — ANTHROPIC_API_KEY isn't set in Railway."
-    messages = [{"role": "user", "content": user_content}]
-    kwargs = {"model": MODEL, "max_tokens": max_tokens, "system": SYSTEM, "messages": messages}
+    work = list(messages)
+    kwargs = {"model": MODEL, "max_tokens": max_tokens, "system": SYSTEM, "messages": work}
     if think:
         kwargs["thinking"] = {"type": "adaptive"}
     if search:
@@ -74,11 +84,21 @@ async def ask_claude(user_content, *, search=True, think=True, max_tokens=4096):
     for _ in range(6):   # allow a few pause_turn continuations while it searches
         resp = await claude.messages.create(**kwargs)
         if resp.stop_reason == "pause_turn":
-            messages.append({"role": "assistant", "content": resp.content})
+            work.append({"role": "assistant", "content": resp.content})
             continue
         break
     text = "".join(b.text for b in resp.content if b.type == "text").strip()
     return text or "hmm, I couldn't get a clear read on that — try another photo or a bit more detail? 🌷"
+
+
+async def converse(cid, user_content, *, search=True, think=True, max_tokens=4096):
+    """Add a turn to this chat's ongoing conversation and return the reply."""
+    convo = _convo.setdefault(cid, [])
+    convo.append({"role": "user", "content": user_content})
+    text = await _complete(convo, search=search, think=think, max_tokens=max_tokens)
+    convo.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+    _trim(convo)
+    return text
 
 
 def _split(text, limit=3800):
@@ -142,8 +162,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _schedule(update, context)
 
 
-# most-recent identified item per chat, so the tap-buttons know what "it" is
-_last_item = {}   # chat_id -> {"images": [image blocks], "note": str}
+_has_item = set()   # chats that currently have an item in play (for the tap-buttons)
 
 QUICK_PROMPT = (
     "Identify this item for resale. Give me, in ~4 short punchy lines: brand, model/line, era, key "
@@ -155,6 +174,7 @@ _ITEM_KB = InlineKeyboardMarkup([
      InlineKeyboardButton("📝 Write the listing", callback_data="act:listing")],
     [InlineKeyboardButton("⚠️ Authenticity check", callback_data="act:auth"),
      InlineKeyboardButton("📖 Tell me more", callback_data="act:more")],
+    [InlineKeyboardButton("✅ Done — new item", callback_data="act:done")],
 ])
 
 _ACTIONS = {
@@ -200,11 +220,12 @@ async def _process_batch(context: ContextTypes.DEFAULT_TYPE):
             cid, "hmm, none of the images came through 🌷 try sending them again as Photos "
             "(tap the 📎 → Photo, not File).")
         return
-    _last_item[cid] = {"images": images, "note": buf["note"]}
+    _convo[cid] = []          # new item = fresh conversation (photos become turn 1)
+    _has_item.add(cid)
     note = f"\n\nMy notes: {buf['note']}" if buf["note"] else ""
     try:
-        answer = await ask_claude(images + [{"type": "text", "text": QUICK_PROMPT + note}],
-                                  search=False, think=False, max_tokens=600)
+        answer = await converse(cid, images + [{"type": "text", "text": QUICK_PROMPT + note}],
+                                search=False, think=False, max_tokens=600)
     except Exception as e:
         await context.bot.send_message(cid, f"something went wrong reaching my brain 🌷 ({e}) — try again?")
         return
@@ -223,17 +244,19 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     action = q.data.split(":", 1)[1]
     cid = q.message.chat.id
-    item = _last_item.get(cid)
-    if not item or action not in _ACTIONS:
+    if action == "done":
+        _convo.pop(cid, None)
+        _has_item.discard(cid)
+        await context.bot.send_message(cid, "done with that one ✅ send the next item's photos 🩷")
+        return
+    if cid not in _has_item or action not in _ACTIONS:
         await q.message.reply_text("send me the item photos again 🌷 (I lost track of that one)")
         return
     label, search, prompt = _ACTIONS[action]
-    note = f"\n\nMy notes: {item['note']}" if item["note"] else ""
     await context.bot.send_message(cid, f"{label}… 🔎")
     await context.bot.send_chat_action(cid, ChatAction.TYPING)
     try:
-        answer = await ask_claude(item["images"] + [{"type": "text", "text": prompt + note}],
-                                  search=search, think=True)
+        answer = await converse(cid, [{"type": "text", "text": prompt}], search=search, think=True)
     except Exception as e:
         await context.bot.send_message(cid, f"something went wrong 🌷 ({e}) — try again?")
         return
@@ -242,10 +265,19 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @owner_only
+async def new_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cid = update.effective_chat.id
+    _convo.pop(cid, None)
+    _has_item.discard(cid)
+    await update.message.reply_text("fresh start ✨ send the next item's photos 🩷")
+
+
+@owner_only
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cid = update.effective_chat.id
     await update.effective_chat.send_action(ChatAction.TYPING)
     try:
-        answer = await ask_claude([{"type": "text", "text": update.message.text}])
+        answer = await converse(cid, [{"type": "text", "text": update.message.text}])
     except Exception as e:
         await update.message.reply_text(f"something went wrong 🌷 ({e}) — try again?")
         return
@@ -262,7 +294,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 📝 write the listing\n"
         "• ⚠️ authenticity check\n"
         "• 📖 tell me more\n\n"
-        "💬 or just *ask me anything* — pricing, what a piece is, how to word something.\n\n"
+        "💬 then *keep chatting* — I remember the item, so ask follow-ups freely "
+        "(\"can you make the title punchier?\", \"is the price fair?\").\n"
+        "✅ when you're onto the next piece, tap *Done* or send /new.\n\n"
         "add a caption with your photos for extra context (e.g. \"tan leather, no date code\").",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -318,6 +352,7 @@ def main():
     _start_health_server()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("new", new_item))
     app.add_handler(CommandHandler("id", whoami))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, on_document))
