@@ -179,8 +179,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @owner_only
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"your user id: `{update.effective_user.id}`\n(add it to OWNER_ID in Railway to lock the bot to you)",
-        parse_mode=ParseMode.MARKDOWN,
+        f"your user id: {update.effective_user.id}\n\n"
+        "add it to OWNER_ID in Railway to lock the bot to you 🩷"
     )
 
 
